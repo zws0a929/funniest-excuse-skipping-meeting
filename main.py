@@ -37,7 +37,11 @@ It writes exactly that one line, plus a single trailing newline, to the
 output file (default ``/output/entry.txt``). Nothing else is ever written:
 no randomness, no clock, no environment dependence, so every run produces
 byte-identical output. The write is atomic (temporary file in the same
-directory, then an ``os.replace`` rename), and the gate from the
+directory, then an ``os.replace`` rename), and the finished file must end
+up world-readable (mode 0644): the grader's output collector runs as a
+different user and rejects outputs it cannot read, so the temporary file
+is created with a plain ``open`` (which honours the process umask) rather
+than ``tempfile.mkstemp`` (which forces mode 0600). The gate from the
 competition rules is enforced before anything is written: the text must be
 UTF-8, 1 to 200 characters, and not only whitespace, with no control
 characters.
@@ -160,16 +164,31 @@ def write_entry(path: str) -> str:
     The file is written to a temporary file in the same directory and then
     moved into place with :func:`os.replace`, so a reader never sees a
     half-written entry and a failed run never leaves a stale file behind.
+
+    The temporary file is created with a plain :func:`open` call (not
+    :func:`tempfile.mkstemp`): ``mkstemp`` creates the file with mode 0600,
+    and ``os.replace`` preserves that mode, so the finished entry would be
+    unreadable by any other user -- including the grader's output
+    collector, which runs as a different uid and rejects outputs it cannot
+    read. A plain ``open`` creates the file with the process umask
+    (normally 022, i.e. mode 0644), so the finished entry is world-readable
+    as the grader requires.
     """
     content = build_content()
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=".entry-", dir=directory)
+    tmp_path = os.path.join(directory, ".entry.txt.tmp")
     try:
-        with os.fdopen(fd, "wb") as handle:
+        with open(tmp_path, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        # Force mode 0644 explicitly: a plain open honours the process
+        # umask, and this environment runs with umask 0007 (which would
+        # leave the file 0660, still unreadable by another user). The
+        # grader must be able to read the finished entry, so set the mode
+        # before the rename.
+        os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, path)
     except BaseException:
         try:
